@@ -245,11 +245,11 @@ As a rule of thumb, if you're proposing an API breaking change or a change to ex
 ## Maintainers
 Bryan Keller
 - https://github.com/bryankeller
-- https://twitter.com/BKyourway19
+- [https://x.com/blk19_](https://x.com/blk19_)
 
 Bryn Bodayle
 - https://github.com/brynbodayle
-- https://twitter.com/brynbodayle
+- https://x.com/brynbodayle
 
 If you or your company has found `MagazineLayout` to be useful, let us know!
 
