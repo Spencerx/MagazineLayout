@@ -13,6 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+import os
 import UIKit
 
 /// A collection view layout that can display items in a grid and list arrangement.
@@ -42,6 +43,9 @@ public final class MagazineLayout: UICollectionViewLayout {
 
   // MARK: Public
   
+  /// A temporary flag to enable safely testing some optimizations.
+  public static var _enableExperimentalOptimizations = false
+
   /// The vertical layout direction of items in the collection view. This property changes the behavior of
   /// scroll-position-preservation when performing batch updates or when the collection view's bounds changes.
   public var verticalLayoutDirection = MagazineLayoutVerticalLayoutDirection.topToBottom
@@ -59,12 +63,27 @@ public final class MagazineLayout: UICollectionViewLayout {
   }
 
   override public var collectionViewContentSize: CGSize {
+    let signpostID = OSSignpostID(log: signpostLog)
+    os_signpost(.begin, log: signpostLog, name: SignpostName.collectionViewContentSize, signpostID: signpostID)
+    defer {
+      os_signpost(.end, log: signpostLog, name: SignpostName.collectionViewContentSize, signpostID: signpostID)
+    }
+
     guard collectionView != nil else { return .zero }
-    return layoutState.contentSize
+    return updatedLayoutState().contentSize
   }
 
   override public func prepare() {
+    let prepareSignpostID = OSSignpostID(log: signpostLog)
+    os_signpost(.begin, log: signpostLog, name: SignpostName.prepare, signpostID: prepareSignpostID)
+    defer {
+      os_signpost(.end, log: signpostLog, name: SignpostName.prepare, signpostID: prepareSignpostID)
+    }
+
     super.prepare()
+
+    _currentCollectionView = collectionView
+    _delegateMagazineLayout = currentCollectionView.delegate as? UICollectionViewDelegateMagazineLayout
 
     // Save the previous collection view width if necessary
     if prepareActions.contains(.cachePreviousWidth) {
@@ -78,9 +97,31 @@ public final class MagazineLayout: UICollectionViewLayout {
       hasPinnedHeaderOrFooter = false
     }
 
+    var reusableIndexPath = IndexPath(item: 0, section: 0)
+
+    // Update widths if necessary (e.g. after rotation or other bounds change)
+    if prepareActions.contains(.updateWidths) {
+      let signpostID = OSSignpostID(log: signpostLog)
+      os_signpost(.begin, log: signpostLog, name: SignpostName.prepareUpdateWidths, signpostID: signpostID)
+
+      for sectionIndex in 0..<modelState.numberOfSections {
+        let sectionMetrics = metricsForSection(atIndex: sectionIndex)
+        modelState.updateMetrics(to: sectionMetrics, forSectionAtIndex: sectionIndex)
+      }
+
+      os_signpost(.end, log: signpostLog, name: SignpostName.prepareUpdateWidths, signpostID: signpostID)
+    }
+
     // Update layout metrics if necessary
     if prepareActions.contains(.updateLayoutMetrics) {
+      let signpostID = OSSignpostID(log: signpostLog)
+      os_signpost(.begin, log: signpostLog, name: SignpostName.prepareUpdateLayoutMetrics, signpostID: signpostID)
+
       for sectionIndex in 0..<modelState.numberOfSections {
+        if Self._enableExperimentalOptimizations {
+          reusableIndexPath.section = sectionIndex
+        }
+
         let sectionMetrics = metricsForSection(atIndex: sectionIndex)
         modelState.updateMetrics(to: sectionMetrics, forSectionAtIndex: sectionIndex)
 
@@ -104,16 +145,26 @@ public final class MagazineLayout: UICollectionViewLayout {
 
         let numberOfItems = modelState.numberOfItems(inSectionAtIndex: sectionIndex)
         for itemIndex in 0..<numberOfItems {
-          let indexPath = IndexPath(item: itemIndex, section: sectionIndex)
-          modelState.updateItemSizeMode(to: sizeModeForItem(at: indexPath), forItemAt: indexPath)
+          if Self._enableExperimentalOptimizations {
+            reusableIndexPath.item = itemIndex
+            modelState.updateItemSizeMode(to: sizeModeForItem(at: reusableIndexPath), forItemAt: reusableIndexPath)
+          } else {
+            let indexPath = IndexPath(item: itemIndex, section: sectionIndex)
+            modelState.updateItemSizeMode(to: sizeModeForItem(at: indexPath), forItemAt: indexPath)
+          }
         }
       }
+
+      os_signpost(.end, log: signpostLog, name: SignpostName.prepareUpdateLayoutMetrics, signpostID: signpostID)
     }
 
     // Recreate section models from scratch if necessary
     if prepareActions.contains(.recreateSectionModels) {
+      let signpostID = OSSignpostID(log: signpostLog)
+      os_signpost(.begin, log: signpostLog, name: SignpostName.prepareRecreateSectionModels, signpostID: signpostID)
+
       layoutStateBeforeRecreateSectionModels = LayoutState(
-        modelState: layoutState.modelState.copy(),
+        modelState: modelState.copy(),
         bounds: currentCollectionView.bounds,
         contentInset: contentInset,
         scale: scale,
@@ -121,19 +172,33 @@ public final class MagazineLayout: UICollectionViewLayout {
 
       var sections = [SectionModel]()
       for sectionIndex in 0..<currentCollectionView.numberOfSections {
-        let sectionModel = sectionModelForSection(atIndex: sectionIndex)
+        if Self._enableExperimentalOptimizations {
+          reusableIndexPath.section = sectionIndex
+        }
+
+        let sectionModel = sectionModelForSection(
+          atIndex: sectionIndex,
+          reusableIndexPath: &reusableIndexPath)
         sections.append(sectionModel)
       }
 
       modelState.setSections(sections)
+
+      os_signpost(.end, log: signpostLog, name: SignpostName.prepareRecreateSectionModels, signpostID: signpostID)
     }
 
     prepareActions = []
   }
 
   override public func prepare(forCollectionViewUpdates updateItems: [UICollectionViewUpdateItem]) {
+    let prepareForCollectionViewUpdatesSignpostID = OSSignpostID(log: signpostLog)
+    os_signpost(.begin, log: signpostLog, name: SignpostName.prepareForCollectionViewUpdates, signpostID: prepareForCollectionViewUpdatesSignpostID)
+    defer {
+      os_signpost(.end, log: signpostLog, name: SignpostName.prepareForCollectionViewUpdates, signpostID: prepareForCollectionViewUpdatesSignpostID)
+    }
+
     let layoutStateBeforeCollectionViewUpdates = LayoutState(
-      modelState: layoutState.modelState.copy(),
+      modelState: modelState.copy(),
       bounds: currentCollectionView.bounds,
       contentInset: contentInset,
       scale: scale,
@@ -141,6 +206,7 @@ public final class MagazineLayout: UICollectionViewLayout {
     self.layoutStateBeforeCollectionViewUpdates = layoutStateBeforeCollectionViewUpdates
 
     var updates = [CollectionViewUpdate<SectionModel, ItemModel>]()
+    var reusableIndexPath = IndexPath(item: 0, section: 0)
 
     for updateItem in updateItems {
       let updateAction = updateItem.updateAction
@@ -154,7 +220,12 @@ public final class MagazineLayout: UICollectionViewLayout {
         }
 
         if indexPath.item == NSNotFound {
-          let sectionModel = sectionModelForSection(atIndex: indexPath.section)
+          if Self._enableExperimentalOptimizations {
+            reusableIndexPath.section = indexPath.section
+          }
+          let sectionModel = sectionModelForSection(
+            atIndex: indexPath.section,
+            reusableIndexPath: &reusableIndexPath)
           updates.append(.sectionReload(sectionIndex: indexPath.section, newSection: sectionModel))
         } else {
           let itemModel = itemModelForItem(at: indexPath)
@@ -182,7 +253,12 @@ public final class MagazineLayout: UICollectionViewLayout {
         }
 
         if indexPath.item == NSNotFound {
-          let sectionModel = sectionModelForSection(atIndex: indexPath.section)
+          if Self._enableExperimentalOptimizations {
+            reusableIndexPath.section = indexPath.section
+          }
+          let sectionModel = sectionModelForSection(
+            atIndex: indexPath.section,
+            reusableIndexPath: &reusableIndexPath)
           updates.append(.sectionInsert(sectionIndex: indexPath.section, newSection: sectionModel))
         } else {
           let itemModel = itemModelForItem(at: indexPath)
@@ -227,6 +303,7 @@ public final class MagazineLayout: UICollectionViewLayout {
 
     if let layoutStateBeforeCollectionViewUpdates{
       let targetContentOffsetAnchor = layoutStateBeforeCollectionViewUpdates.targetContentOffsetAnchor
+      let layoutState = updatedLayoutState()
       let targetYOffset = layoutState.yOffset(
         for: targetContentOffsetAnchor,
         isPerformingBatchUpdates: true)
@@ -248,7 +325,7 @@ public final class MagazineLayout: UICollectionViewLayout {
 
     if currentCollectionView.bounds.size != oldBounds.size {
       layoutStateBeforeAnimatedBoundsChange = LayoutState(
-        modelState: layoutState.modelState.copy(),
+        modelState: modelState.copy(),
         bounds: oldBounds,
         contentInset: contentInset,
         scale: scale,
@@ -289,6 +366,12 @@ public final class MagazineLayout: UICollectionViewLayout {
     // details about the updates to the collection view before `layoutAttributesForElementsInRect:`
     // is invoked, enabling them to resolve their layout in time.
     guard !hasDataSourceCountInvalidationBeforeReceivingUpdateItems else { return nil }
+
+    let signpostID = OSSignpostID(log: signpostLog)
+    os_signpost(.begin, log: signpostLog, name: SignpostName.layoutAttributesForElementsInRect, signpostID: signpostID)
+    defer {
+      os_signpost(.end, log: signpostLog, name: SignpostName.layoutAttributesForElementsInRect, signpostID: signpostID)
+    }
 
     var layoutAttributesInRect = [UICollectionViewLayoutAttributes]()
 
@@ -670,13 +753,15 @@ public final class MagazineLayout: UICollectionViewLayout {
       withOriginalAttributes: originalAttributes) as! MagazineLayoutInvalidationContext
     context.invalidateLayoutMetrics = false
 
+    let layoutState = updatedLayoutState()
+
     switch preferredAttributes.representedElementCategory {
     case .cell:
       let targetContentOffsetAnchor = (
         layoutStateBeforeRecreateSectionModels ??
           layoutStateBeforeCollectionViewUpdates ??
           layoutStateBeforeAnimatedBoundsChange ??
-          self.layoutState
+          layoutState
       ).targetContentOffsetAnchor
       let targetYOffsetBefore = layoutState.yOffset(
         for: targetContentOffsetAnchor,
@@ -762,6 +847,12 @@ public final class MagazineLayout: UICollectionViewLayout {
       return
     }
 
+    let signpostID = OSSignpostID(log: signpostLog)
+    os_signpost(.begin, log: signpostLog, name: SignpostName.invalidateLayout, signpostID: signpostID)
+    defer {
+      os_signpost(.end, log: signpostLog, name: SignpostName.invalidateLayout, signpostID: signpostID)
+    }
+
     // If our layout direction is `bottomToTop`, allow changes to the top and bottom content insets
     // to automatically adjust the content offset. `UICollectionView` behaves this way by default
     // when the top content inset changes, so this adds the same behavior.
@@ -792,7 +883,12 @@ public final class MagazineLayout: UICollectionViewLayout {
       screenScale: scale)
       ?? false
     if !isSameWidth {
-      prepareActions.formUnion([.updateLayoutMetrics, .cachePreviousWidth])
+      prepareActions.formUnion(.cachePreviousWidth)
+      if MagazineLayout._enableExperimentalOptimizations {
+        prepareActions.formUnion(.updateWidths)
+      } else {
+        prepareActions.formUnion(.updateLayoutMetrics)
+      }
     }
 
     if context.invalidateLayoutMetrics && shouldInvalidateLayoutMetrics {
@@ -823,7 +919,7 @@ public final class MagazineLayout: UICollectionViewLayout {
       return super.targetContentOffset(forProposedContentOffset: proposedContentOffset)
     }
 
-    let yOffset = layoutState.yOffset(
+    let yOffset = updatedLayoutState().yOffset(
       for: layoutStateBefore.targetContentOffsetAnchor,
       isPerformingBatchUpdates: layoutStateBeforeCollectionViewUpdates != nil)
 
@@ -873,7 +969,8 @@ public final class MagazineLayout: UICollectionViewLayout {
 
     static let recreateSectionModels = PrepareActions(rawValue: 1 << 0)
     static let updateLayoutMetrics = PrepareActions(rawValue: 1 << 1)
-    static let cachePreviousWidth = PrepareActions(rawValue: 1 << 2)
+    static let updateWidths = PrepareActions(rawValue: 1 << 2)
+    static let cachePreviousWidth = PrepareActions(rawValue: 1 << 3)
   }
   private var prepareActions: PrepareActions = []
 
@@ -885,12 +982,26 @@ public final class MagazineLayout: UICollectionViewLayout {
   private var cachedCollectionViewWidth: CGFloat?
   private var previousContentInset: UIEdgeInsets?
 
-  private var currentCollectionView: UICollectionView {
-    guard let collectionView = collectionView else {
-      preconditionFailure("`collectionView` should not be `nil`")
-    }
+  // Unowned unsafe references to avoid weak reference overhead.
+  private unowned(unsafe) var _currentCollectionView: UICollectionView?
+  private unowned(unsafe) var _delegateMagazineLayout: UICollectionViewDelegateMagazineLayout?
 
-    return collectionView
+  @inline(__always)
+  private var currentCollectionView: UICollectionView {
+    if MagazineLayout._enableExperimentalOptimizations {
+      _currentCollectionView ?? collectionView!
+    } else {
+      collectionView!
+    }
+  }
+
+  @inline(__always)
+  private var delegateMagazineLayout: UICollectionViewDelegateMagazineLayout? {
+    if MagazineLayout._enableExperimentalOptimizations {
+      _delegateMagazineLayout
+    } else {
+      currentCollectionView.delegate as? UICollectionViewDelegateMagazineLayout
+    }
   }
 
   // Used to provide the model state with the current visible bounds for the sole purpose of
@@ -917,10 +1028,6 @@ public final class MagazineLayout: UICollectionViewLayout {
       height: currentCollectionView.bounds.height - contentInset.top - contentInset.bottom + refreshControlHeight)
   }
 
-  private var delegateMagazineLayout: UICollectionViewDelegateMagazineLayout? {
-    return currentCollectionView.delegate as? UICollectionViewDelegateMagazineLayout
-  }
-
   private var scale: CGFloat {
     collectionView?.traitCollection.nonZeroDisplayScale ?? 1
   }
@@ -929,16 +1036,21 @@ public final class MagazineLayout: UICollectionViewLayout {
     currentCollectionView.adjustedContentInset
   }
 
-  private var layoutState: LayoutState {
+  private var modelState: ModelState {
+    if MagazineLayout._enableExperimentalOptimizations {
+      _layoutState.modelState
+    } else {
+      updatedLayoutState().modelState
+    }
+  }
+
+  /// Relatively expensive compared to just grabbing the `_layoutState`; only use if you need updated metrics.
+  private func updatedLayoutState() -> LayoutState {
     _layoutState.bounds = currentCollectionView.bounds
     _layoutState.contentInset = contentInset
     _layoutState.scale = scale
     _layoutState.verticalLayoutDirection = verticalLayoutDirection
     return _layoutState
-  }
-
-  private var modelState: ModelState {
-    layoutState.modelState
   }
 
   private func metricsForSection(atIndex sectionIndex: Int) -> MagazineLayoutSectionMetrics {
@@ -1045,9 +1157,23 @@ public final class MagazineLayout: UICollectionViewLayout {
     }
   }
 
-  private func sectionModelForSection(atIndex sectionIndex: Int) -> SectionModel {
-    let itemModels = (0..<currentCollectionView.numberOfItems(inSection: sectionIndex)).map {
-      itemModelForItem(at: IndexPath(item: $0, section: sectionIndex))
+  private func sectionModelForSection(
+    atIndex sectionIndex: Int,
+    reusableIndexPath: inout IndexPath)
+    -> SectionModel
+  {
+    let numberOfItems = currentCollectionView.numberOfItems(inSection: sectionIndex)
+    var itemModels = [ItemModel]()
+    itemModels.reserveCapacity(numberOfItems)
+
+    for itemIndex in 0..<numberOfItems {
+      if Self._enableExperimentalOptimizations {
+        reusableIndexPath.item = itemIndex
+        itemModels.append(itemModelForItem(at: reusableIndexPath))
+      } else {
+        itemModels.append(itemModelForItem(at: IndexPath(item: itemIndex, section: sectionIndex)))
+      }
+
     }
 
     return SectionModel(
